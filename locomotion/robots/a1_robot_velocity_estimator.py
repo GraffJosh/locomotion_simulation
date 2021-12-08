@@ -13,9 +13,9 @@ class VelocityEstimator:
   """
   def __init__(self,
                robot,
-               accelerometer_variance=0.1,
+               accelerometer_variance=0.5,
                sensor_variance=0.1,
-               initial_variance=0.1):
+               initial_variance=0.2):
     """Initiates the velocity estimator.
 
     See filterpy documentation in the link below for more details.
@@ -63,9 +63,10 @@ class VelocityEstimator:
     rot_mat = self.robot.pybullet_client.getMatrixFromQuaternion(
         base_orientation)
     rot_mat = np.array(rot_mat).reshape((3, 3))
-    calibrated_acc = rot_mat.dot(sensor_acc) + np.array([0., 0., -9.8])
+    calibrated_acc = rot_mat.dot(sensor_acc) + np.array([-0.029, 0.539, 9.789])#[0., 0., -9.8])
     self.filter.predict(u=calibrated_acc * delta_time_s)
 
+    # print("accel: ",sensor_acc)
     # Correct estimation using contact legs
     observed_velocities = []
     foot_contact = self.robot.GetFootContacts()
@@ -78,7 +79,7 @@ class VelocityEstimator:
         leg_velocity_in_base_frame = jacobian.dot(joint_velocities)
         base_velocity_in_base_frame = -leg_velocity_in_base_frame[:3]
         observed_velocities.append(rot_mat.dot(base_velocity_in_base_frame))
-
+    # print("motor: ", self.robot.motor_velocities[1 * 3:(1 + 1) * 3])
     if observed_velocities:
       observed_velocities = np.mean(observed_velocities, axis=0)
       self.filter.update(observed_velocities)

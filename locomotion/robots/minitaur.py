@@ -93,7 +93,7 @@ class Minitaur(object):
                pd_latency=0.0,
                control_latency=0.0,
                observation_noise_stdev=SENSOR_NOISE_STDDEV,
-               motor_overheat_protection=False,
+               motor_overheat_protection=True,
                motor_direction=MINITAUR_DEFAULT_MOTOR_DIRECTIONS,
                motor_offset=MINITAUR_DEFAULT_MOTOR_OFFSETS,
                on_rack=False,

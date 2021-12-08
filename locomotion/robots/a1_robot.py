@@ -20,6 +20,7 @@ import math
 import re
 import numpy as np
 import time
+from collections import deque
 
 from locomotion.robots import laikago_pose_utils
 from locomotion.robots import a1
@@ -65,11 +66,11 @@ _DEFAULT_HIP_POSITIONS = (
 )
 
 ABDUCTION_P_GAIN = 100.0
-ABDUCTION_D_GAIN = 1.0
+ABDUCTION_D_GAIN = 2.0
 HIP_P_GAIN = 100.0
-HIP_D_GAIN = 2.0
+HIP_D_GAIN = 4.0
 KNEE_P_GAIN = 100.0
-KNEE_D_GAIN = 2.0
+KNEE_D_GAIN = 4.0
 
 COMMAND_CHANNEL_NAME = 'LCM_Low_Cmd'
 STATE_CHANNEL_NAME = 'LCM_Low_State'
@@ -92,7 +93,8 @@ URDF_FILENAME = "a1/a1.urdf"
 _BODY_B_FIELD_NUMBER = 2
 _LINK_A_FIELD_NUMBER = 3
 
-
+ANG_FILTER_LENGTH = 20
+VEL_FILTER_LENGTH = 10
 class A1Robot(a1.A1):
   """Interface for real A1 robot."""
   MPC_BODY_MASS = 108 / 9.8
@@ -157,6 +159,12 @@ class A1Robot(a1.A1):
     self._last_reset_time = time.time()
     self._velocity_estimator = a1_robot_velocity_estimator.VelocityEstimator(
         self)
+    self.ang_rate_x = deque([0.0] * ANG_FILTER_LENGTH, maxlen=ANG_FILTER_LENGTH)
+    self.ang_rate_y = deque([0.0] * ANG_FILTER_LENGTH, maxlen=ANG_FILTER_LENGTH)
+    self.ang_rate_z = deque([0.0] * ANG_FILTER_LENGTH, maxlen=ANG_FILTER_LENGTH)
+    self.velocity_x = deque([0.0] * VEL_FILTER_LENGTH, maxlen=VEL_FILTER_LENGTH)
+    self.velocity_y = deque([0.0] * VEL_FILTER_LENGTH, maxlen=VEL_FILTER_LENGTH)
+    self.velocity_z = deque([0.0] * VEL_FILTER_LENGTH, maxlen=VEL_FILTER_LENGTH)
 
     # Initiate UDP for robot state and actions
     self._robot_interface = RobotInterface()
@@ -164,6 +172,7 @@ class A1Robot(a1.A1):
 
     kwargs['on_rack'] = True
     super(A1Robot, self).__init__(pybullet_client,
+                                  enable_clip_motor_commands = True,
                                   time_step=time_step,
                                   **kwargs)
     self._init_complete = True
@@ -174,7 +183,10 @@ class A1Robot(a1.A1):
     Synchronous ReceiveObservation is not supported in A1,
     so changging it to noop instead.
     """
+    motorshift_idx = [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+    legshift_idx = [1, 0, 3, 2]
     state = self._robot_interface.receive_observation()
+
     self._raw_state = state
     # Convert quaternion from wxyz to xyzw, which is default for Pybullet.
     q = state.imu.quaternion
@@ -182,10 +194,10 @@ class A1Robot(a1.A1):
     rpy = state.imu.rpy
     self._base_orientation_rpy = np.array([rpy[0], rpy[1], rpy[2]])
     self._motor_angles = np.array([motor.q for motor in state.motorState[:12]])
-    self._motor_velocities = np.array(
-        [motor.dq for motor in state.motorState[:12]])
-    self._joint_states = np.array(
-        list(zip(self._motor_angles, self._motor_velocities)))
+    self._motor_angles = np.array([self._motor_angles[index] for index in motorshift_idx])
+    self._motor_velocities = np.array([motor.dq for motor in state.motorState[:12]])
+    self._motor_velocities = np.array([self._motor_velocities[index] for index in motorshift_idx])
+    self._joint_states = np.array(list(zip(self._motor_angles, self._motor_velocities)))
     if self._init_complete:
       # self._SetRobotStateInSim(self._motor_angles, self._motor_velocities)
       self._velocity_estimator.update(self._raw_state)
@@ -218,16 +230,43 @@ class A1Robot(a1.A1):
     return self._base_orientation_rpy
 
   def GetBaseRollPitchYawRate(self):
-    return self.GetTrueBaseRollPitchYawRate()
+    ang_rate = np.array(self._raw_state.imu.gyroscope).copy()
+    self.ang_rate_x.append(ang_rate[0])
+    self.ang_rate_y.append(ang_rate[1])
+    self.ang_rate_z.append(ang_rate[2])
+    x_comp = sum(self.ang_rate_x) / len(self.ang_rate_x)
+    y_comp = sum(self.ang_rate_y) / len(self.ang_rate_y)
+    z_comp = sum(self.ang_rate_z) / len(self.ang_rate_z)
+    roll_pitch_yaw_rate = np.array([x_comp,y_comp,z_comp])
+
+    return roll_pitch_yaw_rate
 
   def GetTrueBaseRollPitchYawRate(self):
     return np.array(self._raw_state.imu.gyroscope).copy()
 
   def GetBaseVelocity(self):
-    return self._velocity_estimator.estimated_velocity.copy()
+    velocity = np.array(self._velocity_estimator.estimated_velocity.copy())
+    self.velocity_x.append(velocity[0])
+    self.velocity_y.append(velocity[1])
+    self.velocity_z.append(velocity[2])
+    x_comp = sum(self.velocity_x) / len(self.velocity_x)
+    y_comp = sum(self.velocity_y) / len(self.velocity_y)
+    z_comp = sum(self.velocity_z) / len(self.velocity_z)
+    velocity = np.array([x_comp,y_comp,z_comp])
+
+    return velocity
+
+    return
 
   def GetFootContacts(self):
-    return np.array(self._raw_state.footForce) > 20
+    legshift_idx = [1, 0, 3, 2]
+    foot_contacts = np.array([self._raw_state.footForce[index] for index in legshift_idx])
+    return foot_contacts > 15
+
+  def GetFootForce(self):
+    legshift_idx = [1, 0, 3, 2]
+    foot_contacts = np.array([self._raw_state.footForce[index] for index in legshift_idx])
+    return foot_contacts
 
   def GetTimeSinceReset(self):
     return time.time() - self._last_reset_time
@@ -247,9 +286,10 @@ class A1Robot(a1.A1):
         or motor pwms (for Minitaur only).
       motor_control_mode: A MotorControlMode enum.
     """
+
+    motorshift_idx = [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
     if motor_control_mode is None:
       motor_control_mode = self._motor_control_mode
-
     command = np.zeros(60, dtype=np.float32)
     if motor_control_mode == robot_config.MotorControlMode.POSITION:
       for motor_id in range(NUM_MOTORS):
@@ -259,6 +299,7 @@ class A1Robot(a1.A1):
     elif motor_control_mode == robot_config.MotorControlMode.TORQUE:
       for motor_id in range(NUM_MOTORS):
         command[motor_id * 5 + 4] = motor_commands[motor_id]
+        command[motor_id * 5 + 3] = self.motor_kds[motor_id]
     elif motor_control_mode == robot_config.MotorControlMode.HYBRID:
       command = np.array(motor_commands, dtype=np.float32)
     else:
@@ -281,13 +322,13 @@ class A1Robot(a1.A1):
     current_motor_angles = self.GetMotorAngles()
 
     # Stand up in 1.5 seconds, and keep the behavior in this way.
-    standup_time = min(reset_time, 1.5)
-    for t in np.arange(0, reset_time, self.time_step * self._action_repeat):
-      blend_ratio = min(t / standup_time, 1)
-      action = blend_ratio * default_motor_angles + (
-          1 - blend_ratio) * current_motor_angles
-      self.Step(action, robot_config.MotorControlMode.POSITION)
-      time.sleep(self.time_step * self._action_repeat)
+    # standup_time = min(reset_time, 1.5)
+    # for t in np.arange(0, reset_time, self.time_step * self._action_repeat):
+    #   blend_ratio = min(t / standup_time, 1)
+    #   action = blend_ratio * default_motor_angles + (
+    #       1 - blend_ratio) * current_motor_angles
+    #   self.Step(action, robot_config.MotorControlMode.POSITION)
+    #   time.sleep(self.time_step * self._action_repeat)
 
     if self._enable_action_filter:
       self._ResetActionFilter()

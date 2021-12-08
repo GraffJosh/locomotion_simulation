@@ -16,8 +16,11 @@
 import math
 import re
 import numba
+from numba import prange
 import numpy as np
+import time
 import pybullet as pyb  # pytype: disable=import-error
+from timeit import default_timer
 
 from locomotion.robots import laikago_constants
 from locomotion.robots import laikago_motor
@@ -65,12 +68,12 @@ HIP_OFFSETS = np.array([[0.183, -0.047, 0.], [0.183, 0.047, 0.],
                         [-0.183, -0.047, 0.], [-0.183, 0.047, 0.]
                         ]) + COM_OFFSET
 
-ABDUCTION_P_GAIN = 100.0
-ABDUCTION_D_GAIN = 1.
-HIP_P_GAIN = 100.0
-HIP_D_GAIN = 2.0
-KNEE_P_GAIN = 100.0
-KNEE_D_GAIN = 2.0
+ABDUCTION_P_GAIN = 10.0
+ABDUCTION_D_GAIN = 10.0
+HIP_P_GAIN = 10.0
+HIP_D_GAIN = 20.0
+KNEE_P_GAIN = 10.0
+KNEE_D_GAIN = 20.0
 
 # Bases on the readings from Laikago's default pose.
 INIT_MOTOR_ANGLES = np.array([0, 0.9, -1.8] * NUM_LEGS)
@@ -106,6 +109,7 @@ def foot_position_in_hip_frame_to_joint_angle(foot_position, l_hip_sign=1):
 
 @numba.jit(nopython=True, cache=True)
 def foot_position_in_hip_frame(angles, l_hip_sign=1):
+
   theta_ab, theta_hip, theta_knee = angles[0], angles[1], angles[2]
   l_up = 0.2
   l_low = 0.2
@@ -121,6 +125,8 @@ def foot_position_in_hip_frame(angles, l_hip_sign=1):
   off_x = off_x_hip
   off_y = np.cos(theta_ab) * off_y_hip - np.sin(theta_ab) * off_z_hip
   off_z = np.sin(theta_ab) * off_y_hip + np.cos(theta_ab) * off_z_hip
+
+
   return np.array([off_x, off_y, off_z])
 
 
@@ -134,7 +140,7 @@ def analytical_leg_jacobian(leg_angles, leg_id):
   """
   l_up = 0.2
   l_low = 0.2
-  l_hip = 0.08505 * (-1)**(leg_id + 1)
+  l_hip = 0.08505 * (-1)**(leg_id)#JPG Removes +1 from Leg ID
 
   t1, t2, t3 = leg_angles[0], leg_angles[1], leg_angles[2]
   l_eff = np.sqrt(l_up**2 + l_low**2 + 2 * l_up * l_low * np.cos(t3))
@@ -154,14 +160,25 @@ def analytical_leg_jacobian(leg_angles, leg_id):
       t_eff) / l_eff + l_eff * np.sin(t_eff) * np.cos(t1) / 2
   return J
 
-@numba.jit(nopython=True, cache=True, parallel=True)
+#JPG parallel = false exec time from 20ms to 0ms
+@numba.jit(nopython=True, cache=True, parallel=False)
 def foot_positions_in_base_frame(foot_angles):
+  #
   foot_angles = foot_angles.reshape((4, 3))
-  foot_positions = np.zeros((4, 3))
-  for i in range(4):
+  # with numba.objmode(time1='f8'):
+  #       time1 = time.perf_counter()
+
+  foot_positions = np.empty((4, 3))
+
+  for i in prange(4):
     foot_positions[i] = foot_position_in_hip_frame(foot_angles[i],
-                                                   l_hip_sign=(-1)**(i + 1))
-  return foot_positions + HIP_OFFSETS
+                                                   l_hip_sign=(-1)**(i))#JPG Removes +1 from Leg ID
+
+  foot_positions = foot_positions + HIP_OFFSETS
+  # with numba.objmode():
+  #   print('time: {}'.format(time.perf_counter() - time1))
+  return_arr = foot_positions
+  return return_arr
 
 
 class A1(minitaur.Minitaur):
@@ -217,7 +234,7 @@ class A1(minitaur.Minitaur):
       self,
       pybullet_client,
       urdf_filename=URDF_FILENAME,
-      enable_clip_motor_commands=False,
+      enable_clip_motor_commands=True,
       time_step=0.001,
       action_repeat=10,
       sensors=None,
@@ -252,7 +269,7 @@ class A1(minitaur.Minitaur):
         dofs_per_leg=DOFS_PER_LEG,
         motor_direction=JOINT_DIRECTIONS,
         motor_offset=JOINT_OFFSETS,
-        motor_overheat_protection=False,
+        motor_overheat_protection=True,
         motor_control_mode=motor_control_mode,
         motor_model_class=laikago_motor.LaikagoMotorModel,
         sensors=sensors,
@@ -475,7 +492,7 @@ class A1(minitaur.Minitaur):
 
     joint_angles = foot_position_in_hip_frame_to_joint_angle(
         foot_local_position - HIP_OFFSETS[leg_id],
-        l_hip_sign=(-1)**(leg_id + 1))
+        l_hip_sign=(-1)**(leg_id)) #JPG Removes +1 from Leg ID
 
     # Joint offset is necessary for Laikago.
     joint_angles = np.multiply(

@@ -45,6 +45,7 @@ void RobotInterface::SendCommand(std::array<float, 60> motorcmd) {
         cmd.motorCmd[motor_id].tau = motorcmd[motor_id * 5 + 4];
     }
     safe.PositionLimit(cmd);
+    safe.PowerProtect(cmd, state, 1);
     udp.SetSend(cmd);
     udp.Send();
 }
